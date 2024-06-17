@@ -10,6 +10,8 @@
 #include <WiFiMulti.h>
 #include <WiFiClientSecure.h>
 #include <WebSocketsServer.h>
+#include "RollingAverage.h"
+#include "Credentials.h"
 
 RH_ASK receiver(2000, 26, 25, 0);
 WiFiMulti WiFiMulti;
@@ -20,6 +22,18 @@ unsigned long lastSendTime = 0;
 uint8_t buf[MESSAGE_SIZE];
 const uint8_t buflen = sizeof(buf);
 char lastMessage[MESSAGE_SIZE] = "";
+#define THRESHOLD_TIMEOUT 1000
+
+RollingAverage averages[6] = {
+    RollingAverage(15, 3900),  
+    RollingAverage(15, 4005),
+    RollingAverage(15, 4005),
+    RollingAverage(15, 4005),
+    RollingAverage(15, 4005),
+    RollingAverage(15, 3500)
+};
+bool isTriggered[6] = {false, false, false, false, false, false};
+unsigned long lastTriggered[6] = {0, 0, 0, 0, 0, 0};
 
 void hexdump(const void *mem, uint32_t len, uint8_t cols = 16) {
     const uint8_t* src = (const uint8_t*) mem;
@@ -91,13 +105,13 @@ void setup() {
     Serial.println();
     Serial.println();
 
-    for(uint8_t t = 4; t > 0; t--) {
+    for(uint8_t t = 1; t > 0; t--) {
         Serial.printf("[SETUP] BOOT WAIT %d...\n", t);
         Serial.flush();
         delay(1000);
     }
 
-    WiFiMulti.addAP("DeKeyser", "PASSWORDHERE");
+    WiFiMulti.addAP(ACCESSPOINT.c_str(), WIFIKEY.c_str());
 
     Serial.print("Connecting: ");
     while(WiFiMulti.run() != WL_CONNECTED) {
@@ -118,24 +132,47 @@ char sensorBuffer[100];
 bool ledOn = true;
 
 void loop() {
-    webSocket.loop();
+    uint16_t p1 = analogRead(33);
+    uint16_t p2 = analogRead(32);
+    uint16_t p3 = analogRead(35);
+    uint16_t p4 = analogRead(34);
+    uint16_t p5 = analogRead(39);
+    uint16_t p6 = analogRead(36);
 
-    // Read sensor values
-    if (millis() - lastSendTime >= 50) {
-        uint16_t p1 = analogRead(33);
-        uint16_t p2 = analogRead(32);
-        uint16_t p3 = analogRead(35);
-        uint16_t p4 = analogRead(34);
-        uint16_t p5 = analogRead(39);
-        uint16_t p6 = analogRead(36);
+/*    Serial.print(p1);
+    Serial.print(",");
+    delay(100);
+    return;*/
 
-        sprintf(sensorBuffer, "%u,%u,%u,%u,%u,%u", p1, p2, p3, p4, p5, p6);
-        webSocket.broadcastTXT(sensorBuffer);
-        lastSendTime = millis();
+    averages[0].addValue(p1);
+    averages[1].addValue(p2);
+    averages[2].addValue(p3);
+    averages[3].addValue(p4);
+    averages[4].addValue(p5);
+    averages[5].addValue(p6);
 
-        digitalWrite(LED_BUILTIN, ledOn);
-        ledOn = !ledOn;
+    for(int i = 0; i < 6; i++) {
+        if (millis() - lastTriggered[i] > THRESHOLD_TIMEOUT && averages[i].isThresholdReached() && !isTriggered[i]) {
+            lastTriggered[i] = millis();
+            Serial.print("Threshold reached for: ");
+            Serial.print(i);
+            Serial.print(" with average values: ");
+            Serial.println(averages[i].getAverage());
+
+            sprintf(sensorBuffer, "pocket,%u", i);
+
+            Serial.print("Message: ");
+            Serial.println(sensorBuffer);
+
+            webSocket.broadcastTXT(sensorBuffer);
+
+            isTriggered[i] = true;
+        } else if (!averages[i].isThresholdReached()) {
+            isTriggered[i] = false;
+        }
     }
+
+    webSocket.loop();
 
     uint8_t msgLen;
     msgLen = buflen - 1;
